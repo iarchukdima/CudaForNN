@@ -3,3 +3,7 @@ In this project numpy(on cuda), C code on CUDA and on CPU are compared in the ta
 For the matMul and Softmax naive and more advanced kernels were implemented and compared in speedup.
 
 There is a 1.6x speedup for the matMul and 16x speedup for the softmax.
+
+Here is the plot for comparing performance on MNIST. For the training all models had batch size equal to 32 and 10 epochs.
+
+![cpuVScudaVSnumpy.png]
