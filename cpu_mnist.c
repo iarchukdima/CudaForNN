@@ -25,7 +25,7 @@ typedef struct {
 } NeuralNetwork;
 
 
-// load batched img data
+
 void load_data(const char *filename, float *data, int size) {
     FILE *file = fopen(filename, "rb");
     if (file == NULL) {
@@ -40,7 +40,6 @@ void load_data(const char *filename, float *data, int size) {
     fclose(file);
 }
 
-// load batch labels
 void load_labels(const char *filename, int *labels, int size) {
     FILE *file = fopen(filename, "rb");
     if (file == NULL) {
@@ -207,47 +206,37 @@ void update_gradients(float *grad_weights, float *grad_bias, float *grad_layer, 
 
 void backward(NeuralNetwork *nn, float *input, float *hidden, float *output, int *labels, int batch_size) {
 
-    // Initialize gradients to zero
+
     zero_grad(nn->grad_weights1, HIDDEN_SIZE * INPUT_SIZE);
     zero_grad(nn->grad_weights2, OUTPUT_SIZE * HIDDEN_SIZE);
     zero_grad(nn->grad_bias1, HIDDEN_SIZE);
     zero_grad(nn->grad_bias2, OUTPUT_SIZE);
 
-    // Compute gradients for output layer
     float *grad_output = malloc(batch_size * OUTPUT_SIZE * sizeof(float));
     compute_output_gradients(grad_output, output, labels, batch_size);
 
-    // Update gradients for weights2 (W2.grad = grad_output.T @ hidden)
     matmul_at_b(hidden, grad_output, nn->grad_weights2, batch_size, HIDDEN_SIZE, OUTPUT_SIZE);
 
-    // Update gradients for bias2
     bias_backward(nn->grad_bias2, grad_output, batch_size, OUTPUT_SIZE);
 
-    // Compute dX2 (gradient of loss w.r.t. input of second layer)
     float *dX2 = malloc(batch_size * HIDDEN_SIZE * sizeof(float));
 
-    // grad_output @ W2.T = dX2 -> (B, 10) @ (10, 256) = (B, 256)
     matmul_a_bt(grad_output, nn->weights2, dX2, batch_size, OUTPUT_SIZE, HIDDEN_SIZE);
 
-    // Compute d_ReLU_out (element-wise multiplication with ReLU derivative)
     float *d_ReLU_out = malloc(batch_size * HIDDEN_SIZE * sizeof(float));
     for (int i = 0; i < batch_size * HIDDEN_SIZE; i++) {
         d_ReLU_out[i] = dX2[i] * (hidden[i] > 0);
     }
-    // retains its shape since its just a point-wise operation
-    // Update gradients for weights1 (W1.grad = d_ReLU_out.T @ input)
+    
     matmul_at_b(input, d_ReLU_out, nn->grad_weights1, batch_size, INPUT_SIZE, HIDDEN_SIZE);
 
-    // Update gradients for bias1
     bias_backward(nn->grad_bias1, d_ReLU_out, batch_size, HIDDEN_SIZE);
 
-    // Free allocated memory
     free(grad_output);
     free(dX2);
     free(d_ReLU_out);
 }
 
-// gradient descent step
 void update_weights(NeuralNetwork *nn) {
     for (int i = 0; i < HIDDEN_SIZE * INPUT_SIZE; i++) {
         nn->weights1[i] -= LEARNING_RATE * nn->grad_weights1[i];
@@ -263,7 +252,6 @@ void update_weights(NeuralNetwork *nn) {
     }
 }
 
-// Modify train function to work with batches
 void train(NeuralNetwork *nn, float *X_train, int *y_train) {
     float *hidden = malloc(BATCH_SIZE * HIDDEN_SIZE * sizeof(float));
     float *output = malloc(BATCH_SIZE * OUTPUT_SIZE * sizeof(float));
@@ -312,7 +300,6 @@ void train(NeuralNetwork *nn, float *X_train, int *y_train) {
     free(output);
 }
 
-// Modify the initialize function to allocate memory for gradients
 void initialize_neural_network(NeuralNetwork *nn) {
     nn->weights1 = malloc(HIDDEN_SIZE * INPUT_SIZE * sizeof(float));
     nn->weights2 = malloc(OUTPUT_SIZE * HIDDEN_SIZE * sizeof(float));
