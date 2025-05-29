@@ -7,7 +7,6 @@
 #define NUM_RUNS 10
 #define EPSILON 1e-5
 
-// Shared memory (tiled) version
 __global__ void matmul_shared_kernel(const float *A, const float *B, float *C, int m, int n, int k) {
     __shared__ float tileA[TILE_SIZE][TILE_SIZE];
     __shared__ float tileB[TILE_SIZE][TILE_SIZE];
@@ -44,7 +43,6 @@ __global__ void matmul_shared_kernel(const float *A, const float *B, float *C, i
     }
 }
 
-// Naive version
 __global__ void matmul_naive_kernel(const float *A, const float *B, float *C, int m, int n, int k) {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -86,11 +84,9 @@ float benchmark_kernel(void (*kernel)(const float*, const float*, float*, int, i
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     
-    // Warm-up
     kernel<<<grid, block>>>(d_A, d_B, d_C, m, n, k);
     cudaDeviceSynchronize();
     
-    // Timing
     cudaEventRecord(start);
     for (int i = 0; i < NUM_RUNS; ++i) {
         kernel<<<grid, block>>>(d_A, d_B, d_C, m, n, k);
@@ -110,28 +106,23 @@ float benchmark_kernel(void (*kernel)(const float*, const float*, float*, int, i
 void run_comparison(int m, int n, int k) {
     std::cout << "\nRunning comparison for " << m << "x" << n << " * " << n << "x" << k << " matrices...\n";
 
-    // Host matrices
     float *h_A = new float[m * n];
     float *h_B = new float[n * k];
     float *h_C_naive = new float[m * k];
     float *h_C_shared = new float[m * k];
 
-    // Initialize input matrices with random values
     initialize_matrix(h_A, m, n);
     initialize_matrix(h_B, n, k);
 
-    // Device matrices
     float *d_A, *d_B, *d_C_naive, *d_C_shared;
     cudaMalloc(&d_A, m * n * sizeof(float));
     cudaMalloc(&d_B, n * k * sizeof(float));
     cudaMalloc(&d_C_naive, m * k * sizeof(float));
     cudaMalloc(&d_C_shared, m * k * sizeof(float));
 
-    // Copy input matrices to device
     cudaMemcpy(d_A, h_A, m * n * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_B, h_B, n * k * sizeof(float), cudaMemcpyHostToDevice);
 
-    // Kernel configurations
     dim3 block_naive(16, 16);
     dim3 grid_naive((k + block_naive.x - 1) / block_naive.x,
                    (m + block_naive.y - 1) / block_naive.y);
@@ -140,40 +131,32 @@ void run_comparison(int m, int n, int k) {
     dim3 grid_shared((k + TILE_SIZE - 1) / TILE_SIZE,
                     (m + TILE_SIZE - 1) / TILE_SIZE);
 
-    // Run naive kernel and copy result
     matmul_naive_kernel<<<grid_naive, block_naive>>>(d_A, d_B, d_C_naive, m, n, k);
     cudaMemcpy(h_C_naive, d_C_naive, m * k * sizeof(float), cudaMemcpyDeviceToHost);
 
-    // Run shared memory kernel and copy result
     matmul_shared_kernel<<<grid_shared, block_shared>>>(d_A, d_B, d_C_shared, m, n, k);
     cudaMemcpy(h_C_shared, d_C_shared, m * k * sizeof(float), cudaMemcpyDeviceToHost);
 
-    // Verify results match
     bool results_match = compare_matrices(h_C_naive, h_C_shared, m, k);
     std::cout << "Results verification: " << (results_match ? "PASSED" : "FAILED") << "\n";
 
     if (results_match) {
-        // Benchmark naive kernel
         float naive_time = benchmark_kernel(matmul_naive_kernel, d_A, d_B, d_C_naive, 
                                           m, n, k, grid_naive, block_naive);
         
-        // Benchmark shared memory kernel
         float shared_time = benchmark_kernel(matmul_shared_kernel, d_A, d_B, d_C_shared, 
                                            m, n, k, grid_shared, block_shared);
 
-        // Calculate GFLOPS (2*m*n*k FLOPS)
         double flops = 2.0 * m * n * k;
         double naive_gflops = (flops / (naive_time * 1e6)) / 1e3;
         double shared_gflops = (flops / (shared_time * 1e6)) / 1e3;
 
-        // Print performance results
         std::cout << "\nPerformance Results:\n";
         std::cout << "Naive kernel: " << naive_time << " ms (" << naive_gflops << " GFLOPS)\n";
         std::cout << "Shared memory kernel: " << shared_time << " ms (" << shared_gflops << " GFLOPS)\n";
         std::cout << "Speedup: " << naive_time / shared_time << "x\n";
     }
 
-    // Cleanup
     delete[] h_A;
     delete[] h_B;
     delete[] h_C_naive;
@@ -185,10 +168,9 @@ void run_comparison(int m, int n, int k) {
 }
 
 int main() {
-    // Test different matrix sizes
-    run_comparison(256, 256, 256);  // Small matrices
-    run_comparison(1024, 1024, 1024);  // Medium matrices
-    run_comparison(2048, 2048, 2048);  // Large matrices
+    run_comparison(256, 256, 256);
+    run_comparison(1024, 1024, 1024);
+    run_comparison(2048, 2048, 2048);
 
     return 0;
 }
