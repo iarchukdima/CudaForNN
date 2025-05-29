@@ -415,3 +415,226 @@ void backward(NeuralNetwork *nn, float *d_input, float *d_hidden, float *d_outpu
     cudaFree(d_dX2);
     cudaFree(d_grad_hidden);
 }
+
+__global__ void update_weights_kernel(float *weights, float *grad_weights, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        weights[idx] -= LEARNING_RATE * grad_weights[idx];
+    }
+}
+
+void update_weights(NeuralNetwork *nn) {
+    int block_size = 256;
+    int grid_size;
+
+    grid_size = (HIDDEN_SIZE * INPUT_SIZE + block_size - 1) / block_size;
+    update_weights_kernel<<<grid_size, block_size>>>(nn->weights1, nn->grad_weights1, HIDDEN_SIZE * INPUT_SIZE);
+    CUDA_CHECK(cudaGetLastError());
+
+    grid_size = (OUTPUT_SIZE * HIDDEN_SIZE + block_size - 1) / block_size;
+    update_weights_kernel<<<grid_size, block_size>>>(nn->weights2, nn->grad_weights2, OUTPUT_SIZE * HIDDEN_SIZE);
+    CUDA_CHECK(cudaGetLastError());
+
+    grid_size = (HIDDEN_SIZE + block_size - 1) / block_size;
+    update_weights_kernel<<<grid_size, block_size>>>(nn->bias1, nn->grad_bias1, HIDDEN_SIZE);
+    CUDA_CHECK(cudaGetLastError());
+
+    grid_size = (OUTPUT_SIZE + block_size - 1) / block_size;
+    update_weights_kernel<<<grid_size, block_size>>>(nn->bias2, nn->grad_bias2, OUTPUT_SIZE);
+    CUDA_CHECK(cudaGetLastError());
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+
+float evaluate_accuracy(NeuralNetwork *nn, float *d_X_test, int *d_y_test, float *d_hidden, float *d_output, int total_size) {
+    int num_batches = (total_size + BATCH_SIZE - 1) / BATCH_SIZE;
+    int total_correct = 0;
+    int total_processed = 0;
+
+    for (int batch = 0; batch < num_batches; batch++) {
+        int current_batch_size = (batch == num_batches - 1) ?
+            (total_size - batch * BATCH_SIZE) : BATCH_SIZE;
+
+        if (current_batch_size <= 0) break;
+
+        forward(nn, &d_X_test[batch * BATCH_SIZE * INPUT_SIZE],
+                d_hidden, d_output, current_batch_size);
+
+        float *h_output = (float *)malloc(current_batch_size * OUTPUT_SIZE * sizeof(float));
+        int *h_y_test = (int *)malloc(current_batch_size * sizeof(int));
+
+        CUDA_CHECK(cudaMemcpy(h_output, d_output,
+            current_batch_size * OUTPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_y_test, &d_y_test[batch * BATCH_SIZE],
+            current_batch_size * sizeof(int), cudaMemcpyDeviceToHost));
+
+        for (int i = 0; i < current_batch_size; i++) {
+            int predicted = 0;
+            for (int j = 1; j < OUTPUT_SIZE; j++) {
+                if (h_output[i * OUTPUT_SIZE + j] > h_output[i * OUTPUT_SIZE + predicted]) {
+                    predicted = j;
+                }
+            }
+            if (predicted == h_y_test[i]) {
+                total_correct++;
+            }
+        }
+
+        total_processed += current_batch_size;
+        free(h_output);
+        free(h_y_test);
+    }
+
+    return 100.0f * total_correct / total_processed;
+}
+
+void train(NeuralNetwork *nn, float *X_train, int *y_train, float *X_test, int *y_test) {
+    float *d_X_train, *d_X_test, *d_hidden, *d_output;
+    int *d_y_train, *d_y_test;
+
+    CUDA_CHECK(cudaMalloc(&d_X_train, TRAIN_SIZE * INPUT_SIZE * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_X_test, TEST_SIZE * INPUT_SIZE * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_hidden, BATCH_SIZE * HIDDEN_SIZE * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_output, BATCH_SIZE * OUTPUT_SIZE * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_y_train, TRAIN_SIZE * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_y_test, TEST_SIZE * sizeof(int)));
+
+    CUDA_CHECK(cudaMemcpy(d_X_train, X_train, TRAIN_SIZE * INPUT_SIZE * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_X_test, X_test, TEST_SIZE * INPUT_SIZE * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_y_train, y_train, TRAIN_SIZE * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_y_test, y_test, TEST_SIZE * sizeof(int), cudaMemcpyHostToDevice));
+
+    int num_batches = TRAIN_SIZE / BATCH_SIZE;
+
+    for (int epoch = 0; epoch < EPOCHS; epoch++) {
+        float total_loss = 0.0f;
+
+        zero_grad_kernel<<<(HIDDEN_SIZE * INPUT_SIZE + 256 - 1) / 256, 256>>>(nn->grad_weights1, HIDDEN_SIZE * INPUT_SIZE);
+        zero_grad_kernel<<<(OUTPUT_SIZE * HIDDEN_SIZE + 256 - 1) / 256, 256>>>(nn->grad_weights2, OUTPUT_SIZE * HIDDEN_SIZE);
+        zero_grad_kernel<<<(HIDDEN_SIZE + 256 - 1) / 256, 256>>>(nn->grad_bias1, HIDDEN_SIZE);
+        zero_grad_kernel<<<(OUTPUT_SIZE + 256 - 1) / 256, 256>>>(nn->grad_bias2, OUTPUT_SIZE);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        for (int batch = 0; batch < num_batches; batch++) {
+            int start_idx = batch * BATCH_SIZE;
+
+            forward(nn, &d_X_train[start_idx * INPUT_SIZE], d_hidden, d_output, BATCH_SIZE);
+
+            float *h_output = (float *)malloc(BATCH_SIZE * OUTPUT_SIZE * sizeof(float));
+            CUDA_CHECK(cudaMemcpy(h_output, d_output, BATCH_SIZE * OUTPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
+
+            float loss = cross_entropy_loss(h_output, &y_train[start_idx], BATCH_SIZE);
+            total_loss += loss;
+
+            free(h_output);
+
+            backward(nn, &d_X_train[start_idx * INPUT_SIZE], d_hidden, d_output, &d_y_train[start_idx], BATCH_SIZE);
+            update_weights(nn);
+
+            if ((batch + 1) % 100 == 0 || (epoch == 0 && batch == 0)) {
+                int test_start_idx = rand() % (TEST_SIZE - BATCH_SIZE);
+                float test_accuracy = evaluate_accuracy(nn,
+                    &d_X_test[test_start_idx * INPUT_SIZE],
+                    &d_y_test[test_start_idx],
+                    d_hidden, d_output, BATCH_SIZE);
+
+                printf("Epoch %d/%d, Iter %d/%d, Loss: %.4f, Test Accuracy: %.2f%%\n",
+                       epoch + 1, EPOCHS, batch + 1, num_batches,
+                       total_loss / (batch + 1), test_accuracy);
+            }
+        }
+
+        float test_accuracy = evaluate_accuracy(nn, d_X_test, d_y_test, d_hidden, d_output, TEST_SIZE);
+        printf("Epoch %d/%d completed, Loss: %.4f, Test Accuracy: %.2f%%\n",
+            epoch + 1, EPOCHS, total_loss / num_batches, test_accuracy);
+    }
+
+    CUDA_CHECK(cudaFree(d_X_train));
+    CUDA_CHECK(cudaFree(d_X_test));
+    CUDA_CHECK(cudaFree(d_hidden));
+    CUDA_CHECK(cudaFree(d_output));
+    CUDA_CHECK(cudaFree(d_y_train));
+    CUDA_CHECK(cudaFree(d_y_test));
+}
+
+void initialize_neural_network(NeuralNetwork *nn) {
+    CUDA_CHECK(cudaMalloc(&nn->weights1, HIDDEN_SIZE * INPUT_SIZE * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&nn->weights2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&nn->bias1, HIDDEN_SIZE * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&nn->bias2, OUTPUT_SIZE * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&nn->grad_weights1, HIDDEN_SIZE * INPUT_SIZE * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&nn->grad_weights2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&nn->grad_bias1, HIDDEN_SIZE * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&nn->grad_bias2, OUTPUT_SIZE * sizeof(float)));
+
+    float *h_weights1 = (float *)malloc(HIDDEN_SIZE * INPUT_SIZE * sizeof(float));
+    float *h_weights2 = (float *)malloc(OUTPUT_SIZE * HIDDEN_SIZE * sizeof(float));
+    float *h_bias1 = (float *)malloc(HIDDEN_SIZE * sizeof(float));
+    float *h_bias2 = (float *)malloc(OUTPUT_SIZE * sizeof(float));
+
+    initialize_weights(h_weights1, HIDDEN_SIZE * INPUT_SIZE);
+    initialize_weights(h_weights2, OUTPUT_SIZE * HIDDEN_SIZE);
+    initialize_bias(h_bias1, HIDDEN_SIZE);
+    initialize_bias(h_bias2, OUTPUT_SIZE);
+
+    CUDA_CHECK(cudaMemcpy(nn->weights1, h_weights1, HIDDEN_SIZE * INPUT_SIZE * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(nn->weights2, h_weights2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(nn->bias1, h_bias1, HIDDEN_SIZE * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(nn->bias2, h_bias2, OUTPUT_SIZE * sizeof(float), cudaMemcpyHostToDevice));
+
+    free(h_weights1);
+    free(h_weights2);
+    free(h_bias1);
+    free(h_bias2);
+}
+
+int main() {
+    srand(time(NULL));
+
+    NeuralNetwork nn;
+    initialize_neural_network(&nn);
+
+    float *X_train = (float *)malloc(TRAIN_SIZE * INPUT_SIZE * sizeof(float));
+    int *y_train = (int *)malloc(TRAIN_SIZE * sizeof(int));
+    float *X_test = (float *)malloc(TEST_SIZE * INPUT_SIZE * sizeof(float));
+    int *y_test = (int *)malloc(TEST_SIZE * sizeof(int));
+
+    load_data("/content/mnist_data/X_train.bin", X_train, TRAIN_SIZE * INPUT_SIZE);
+    load_labels("/content/mnist_data/y_train.bin", y_train, TRAIN_SIZE);
+    load_data("/content/mnist_data/X_test.bin", X_test, TEST_SIZE * INPUT_SIZE);
+    load_labels("/content/mnist_data/y_test.bin", y_test, TEST_SIZE);
+
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
+    train(&nn, X_train, y_train, X_test, y_test);
+
+    clock_gettime(CLOCK_MONOTONIC, &end);
+
+    double training_time = (end.tv_sec - start.tv_sec) +
+                          (end.tv_nsec - start.tv_nsec) / 1e9;
+
+    printf("\nTotal training time: %.2f sec\n", training_time);
+
+    CUDA_CHECK(cudaFree(nn.weights1));
+    CUDA_CHECK(cudaFree(nn.weights2));
+    CUDA_CHECK(cudaFree(nn.bias1));
+    CUDA_CHECK(cudaFree(nn.bias2));
+    CUDA_CHECK(cudaFree(nn.grad_weights1));
+    CUDA_CHECK(cudaFree(nn.grad_weights2));
+    CUDA_CHECK(cudaFree(nn.grad_bias1));
+    CUDA_CHECK(cudaFree(nn.grad_bias2));
+    free(X_train);
+    free(y_train);
+    free(X_test);
+    free(y_test);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA error: %s\n", cudaGetErrorString(err));
+        return 1;
+    }
+
+    return 0;
+}
